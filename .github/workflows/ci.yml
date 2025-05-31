@@ -1,0 +1,108 @@
+# File: .github/workflows/ci.yml
+name: ESP32 Build & Release
+
+# Trigger on any push, and tags vX.Y.Z; also allow manual dispatch
+on:
+  push:
+    branches: [ main ]           # you can change "main" to your default branch
+    tags:
+      - 'v*.*.*'                 # e.g. v1.0.0, v2.3.4
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: "Build ESP32 firmware"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python 3
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install PlatformIO Core
+        run: |
+          python -m pip install --upgrade pip
+          pip install platformio
+
+      # ----------------------------------------------------------------------------------------------------------------
+      # Build environment: esp32dev
+      # ----------------------------------------------------------------------------------------------------------------
+      - name: Build for esp32dev
+        run: |
+          pio run -e esp32dev --silent
+        # By default, PlatformIO outputs .pio/build/esp32dev/firmware.bin
+      - name: Copy esp32dev firmware to artifacts
+        run: |
+          mkdir -p artifacts
+          cp .pio/build/esp32dev/firmware.bin artifacts/firmware-esp32dev.bin
+
+      # ----------------------------------------------------------------------------------------------------------------
+      # Build environment: esp32-wrover-kit
+      # ----------------------------------------------------------------------------------------------------------------
+      - name: Build for esp32-wrover-kit
+        run: |
+          pio run -e esp32-wrover-kit --silent
+      - name: Copy esp32-wrover-kit firmware to artifacts
+        run: |
+          mkdir -p artifacts
+          cp .pio/build/esp32-wrover-kit/firmware.bin artifacts/firmware-esp32-wrover-kit.bin
+
+      # (If you add more [env:…] stanzas, duplicate the two-step pattern exactly:
+      #  run: pio run -e <env>  then cp .pio/build/<env>/firmware.bin to artifacts/firmware-<env>.bin)
+
+      - name: Upload firmware binaries as build‐artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: firmware-binaries
+          path: artifacts/*.bin
+
+  release:
+    name: "Create GitHub Release with .bin"
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download firmware binaries from build job
+        uses: actions/download-artifact@v3
+        with:
+          name: firmware-binaries
+          path: artifacts
+
+      # --------------------------------------------------------
+      # Create GitHub Release (if it doesn't already exist)
+      # --------------------------------------------------------
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}                  # e.g. "v1.2.3"
+          release_name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+
+      # --------------------------------------------------------
+      # Upload each .bin as a Release asset
+      # --------------------------------------------------------
+      - name: Upload .bin assets to the Release
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: artifacts/firmware-esp32dev.bin
+          asset_name: firmware-esp32dev.bin
+          asset_content_type: application/octet-stream
+
+      - name: Upload .bin for esp32-wrover-kit
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: artifacts/firmware-esp32-wrover-kit.bin
+          asset_name: firmware-esp32-wrover-kit.bin
+          asset_content_type: application/octet-stream
+
+      # (If you built additional .bin files, repeat the upload‐asset step for each one.)
