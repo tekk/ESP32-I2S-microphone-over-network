@@ -37,5 +37,12 @@ The command to run on the Linux terminal for rec audio streaming is:
 #### Set the UDP port you prefer. In my case:
 ##### const int port = 16500;
 
+# Authors
+- @aleiei
+- @tekk
 
+## Contributions are welcome!
 
+## TODO:
+- Possibly add an OPUS codec for compressing the audio (ESP32-S3 and similar should handle this without issues)
+- Add a possibility to use standard electret mic with AGC
