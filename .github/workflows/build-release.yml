@@ -38,14 +38,23 @@ jobs:
         python -m pip install --upgrade pip
         pip install platformio
     
-    - name: Build with PlatformIO
-      run: pio run
+    - name: Build ESP32 firmware
+      run: pio run -e lolin_d32
+    
+    - name: Build ESP32-S3 firmware
+      run: pio run -e esp32-s3-devkitc-1
+    
+    - name: Prepare release files
+      run: |
+        cp .pio/build/lolin_d32/firmware.bin esp32_firmware.bin
+        cp .pio/build/esp32-s3-devkitc-1/firmware.bin esp32_s3_firmware.bin
     
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          .pio/build/esp32dev/firmware.bin
+          .pio/build/lolin_d32/firmware.bin
+          .pio/build/esp32-s3-devkitc-1/firmware.bin
         draft: false
         prerelease: false
       env:
