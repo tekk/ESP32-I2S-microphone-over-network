@@ -1,54 +1,127 @@
-# ESP32-BUG-I2S-MIC
+# ESP32-S3 I2S Microphone WebRTC Streamer
 
-## Simple bug using ESP32 and I2S MEMS microphone for listening and recording Audio via UDP Listener.
+A modern web-based audio streaming solution using ESP32-S3 and I2S MEMS microphone. This project streams audio directly to a web browser using WebRTC and OPUS compression.
 
-The main.cpp file in the src folder was written for PlatformIO, but it is possible to convert it for Arduino IDE.
+## Features
 
-You just need to change the file extension from cpp to ino and delete "#include <Arduino.h>".
+- Real-time audio streaming using WebRTC
+- OPUS audio compression for efficient bandwidth usage
+- Web interface hosted from ESP32-S3
+- Support for ESP32-S3 with PSRAM
+- I2S MEMS microphone support (INMP441)
 
-The project is very simple and requires only a few connections.
+## Hardware Requirements
 
-#### Below you can find the connection diagram for ESP32 Devkit C V2
+- ESP32-S3 board
+- INMP441 I2S MEMS Microphone
 
-![Diagram](/images/ESP32_I2S_MEMS.png)
+## Wiring
 
+Connect the INMP441 microphone to the ESP32-S3:
 
-![NodeMCU](/images/Esp32DevkitC_V2.jpg)
+| INMP441 | ESP32-S3 |
+|---------|----------|
+| VDD     | 3.3V     |
+| GND     | GND      |
+| SD      | GPIO13   |
+| WS/L/R  | GPIO15   |
+| SCK     | GPIO2    |
 
+## Software Requirements
 
-![INMP441](/images/inmp441.jpg)
+- PlatformIO IDE (VS Code extension)
+- ESP32-S3 board support package
+- Required libraries (automatically installed by PlatformIO)
 
+## Installation
 
-You needs a UDP listener like netcat on port 16500 ( in according with sketch ) on listener PC.
+1. Clone this repository:
+```bash
+git clone https://github.com/tekk/ESP32-I2S-microphone-over-network.git
+cd ESP32-I2S-microphone-over-network
+```
 
-To upload SPIFFS data:
-### `pio run -t uploadfs`
+2. Configure WiFi:
+- Edit file `src/wifi_config.h` with your WiFi credentials:
+```cpp
+const char* ssid = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
+```
 
-Build and upload firmware:
-### `pio run -t upload`
+3. Upload the web interface to SPIFFS:
+```bash
+pio run -t uploadfs
+```
 
-The command to run on the Linux terminal for live audio streaming is:
-### "netcat -u -p 16500 -l | play -t s16 -r 48000 -c 2 -" without quotes !
+4. Build and upload the firmware:
+```bash
+pio run -t upload
+```
 
-You needs a SoX utility with mp3 handler for Recorder
+## Usage
 
-Under Linux for recorder (give for file.mp3 the name you prefer).
+1. After uploading, open the Serial Monitor (115200 baud) to see the ESP32's IP address
+2. Open a web browser and navigate to the ESP32's IP address
+3. Click "Start Stream" to begin audio streaming
+4. The audio will play directly in your browser
 
-The command to run on the Linux terminal for rec audio streaming is:
-### "netcat -u -p 16500 -l | rec -t s16 -r 48000 -c 2 - file.mp3" without quotes !
+## Web Interface
 
-#### Set your listener PC's IP here in according with your DHCP network. In my case is 192.168.1.40:
-##### const IPAddress listener = { 192, 168, 1, 40 };
+The web interface provides:
+- Start/Stop streaming controls
+- Connection status indicator
+- Automatic WebRTC connection handling
+- Mobile-friendly design
 
-#### Set the UDP port you prefer. In my case:
-##### const int port = 16500;
+## Technical Details
 
-# Authors
-- @aleiei
-- @tekk
+- Audio Format:
+  - Sample Rate: 48kHz
+  - Bit Depth: 16-bit
+  - Channels: Mono
+  - Compression: OPUS (64kbps)
 
-## Contributions are welcome!
+- WebRTC Configuration:
+  - WebSocket port: 81
+  - HTTP port: 80
 
-## TODO:
-- Possibly add an OPUS codec for compressing the audio (ESP32-S3 and similar should handle this without issues)
-- Add a possibility to use standard electret mic with AGC
+## Troubleshooting
+
+1. If the web interface doesn't load:
+   - Check if SPIFFS upload was successful
+   - Verify the ESP32's IP address in Serial Monitor
+   - Ensure you're on the same network as the ESP32
+
+2. If audio doesn't stream:
+   - Check microphone connections
+   - Verify I2S pin configuration
+   - Check browser console for WebRTC errors
+
+3. If WiFi doesn't connect:
+   - Verify WiFi credentials in wifi_config.h
+   - Check if the ESP32 is in range of the WiFi network
+   - Try power cycling the ESP32
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgments
+
+- Original UDP streaming code by @aleiei
+- WebRTC implementation based on ESP32 WebRTC examples
+- OPUS codec implementation by sh123
+
+## Donate
+
+- Written by @tekk
+
+<form action="https://www.paypal.com/donate" method="post" target="_top">
+<input type="hidden" name="hosted_button_id" value="5SPJW8Y4G2CKJ" />
+<input type="image" src="https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif" border="0" name="submit" title="PayPal - The safer, easier way to pay online!" alt="Donate with PayPal button" />
+<img alt="" border="0" src="https://www.paypal.com/en_SK/i/scr/pixel.gif" width="1" height="1" />
+</form>
