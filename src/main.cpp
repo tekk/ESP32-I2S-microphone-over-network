@@ -29,10 +29,18 @@
 #include "wifi_config.h"
 
 // I2S Configuration
-#define I2S_WS_PIN 15
-#define I2S_SD_PIN 13
-#define I2S_SCK_PIN 2
+#ifdef ESP32
+#define I2S_WS_PIN GPIO_NUM_25
+#define I2S_SD_PIN GPIO_NUM_32
+#define I2S_SCK_PIN GPIO_NUM_26
 #define I2S_PORT I2S_NUM_0
+#elif ESP32S3
+#define I2S_WS_PIN GPIO_NUM_22
+#define I2S_SD_PIN GPIO_NUM_21
+#define I2S_SCK_PIN GPIO_NUM_26
+#define I2S_PORT I2S_NUM_0
+#endif
+
 #define SAMPLE_RATE 48000
 #define SAMPLE_BITS 16
 #define OPUS_FRAME_SIZE 480

@@ -17,15 +17,29 @@ A modern web-based audio streaming solution using ESP32-S3 and I2S MEMS micropho
 
 ## Wiring
 
-Connect the INMP441 microphone to the ESP32-S3:
+Connect the INMP441 microphone to the ESP32 following this:
+
+### ESP32
+
+| INMP441 | ESP32-S3 |
+|---------|----------|
+| VDD     | 3.3V     |
+| GND     | GND      |
+| SD      | GPIO32   |
+| WS      | GPIO15   |
+| SCK     | GPIO26   |
+| L/R     | not connected |
+
+### ESP32-S3
 
 | INMP441 | ESP32-S3 |
 |---------|----------|
 | VDD     | 3.3V     |
 | GND     | GND      |
 | SD      | GPIO13   |
-| WS/L/R  | GPIO15   |
+| WS      | GPIO15   |
 | SCK     | GPIO2    |
+| L/R     | not connected |
 
 ## Software Requirements
 
