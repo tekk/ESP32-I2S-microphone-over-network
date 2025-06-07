@@ -21,6 +21,12 @@ The project is very simple and requires only a few connections.
 
 You needs a UDP listener like netcat on port 16500 ( in according with sketch ) on listener PC.
 
+To upload SPIFFS data:
+### `pio run -t uploadfs`
+
+Build and upload firmware:
+### `pio run -t upload`
+
 The command to run on the Linux terminal for live audio streaming is:
 ### "netcat -u -p 16500 -l | play -t s16 -r 48000 -c 2 -" without quotes !
 

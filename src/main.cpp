@@ -16,152 +16,163 @@
    ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE
    OR OTHER DEALINGS IN THE SOFTWARE.
    
-   Description:
-   Simple I2S INMP441 MEMS microphone Audio Streaming via UDP transmitter
-   Needs a UDP listener like netcat on port 16500 on listener PC
-   Needs a SoX with mp3 handler for Recorder
-   Under Linux for listener:
-   netcat -u -p 16500 -l | play -t s16 -r 48000 -c 2 -
-   Under Linux for recorder (give for file.mp3 the name you prefer) : 
-   netcat -u -p 16500 -l | rec -t s16 -r 48000 -c 2 - file.mp3
-   
 */
 
 #include <Arduino.h>
-#include "WiFi.h"
-#include "AsyncUDP.h"
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <WebSocketsServer.h>
+#include <SPIFFS.h>
+#include <opus.h>
 #include <driver/i2s.h>
-#include <soc/i2s_reg.h>
-#include "wifi_config.h" // Include your WiFi configuration header file
+#include "wifi_config.h"
 
-// Set your listener PC's IP here in according with your DHCP network. In my case is 192.168.1.40:
-IPAddress udpAddress(192, 168, 1, 40);
-const int udpPort = 16500; //UDP Listener Port:
+// I2S Configuration
+#define I2S_WS_PIN 15
+#define I2S_SD_PIN 13
+#define I2S_SCK_PIN 2
+#define I2S_PORT I2S_NUM_0
+#define SAMPLE_RATE 48000
+#define SAMPLE_BITS 16
+#define OPUS_FRAME_SIZE 480
+#define OPUS_MAX_PACKET_SIZE 1500
 
-boolean connected = false; //UDP State:
+// WebSocket server
+WebSocketsServer webSocket = WebSocketsServer(81);
+AsyncWebServer server(80);
 
-AsyncUDP udp; //Class UDP:
+// OPUS encoder
+OpusEncoder* encoder = NULL;
+opus_int16* pcm = NULL;
+unsigned char* opusData = NULL;
 
-const i2s_port_t I2S_PORT = I2S_NUM_0;
-const int block_size = 128;
+// Audio buffer
+const int bufferLen = 1024;
+int16_t sBuffer[bufferLen];
+
+void setupI2S() {
+    const i2s_config_t i2s_config = {
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+        .sample_rate = SAMPLE_RATE,
+        .bits_per_sample = (i2s_bits_per_sample_t)SAMPLE_BITS,
+        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 8,
+        .dma_buf_len = 64,
+        .use_apll = false,
+        .tx_desc_auto_clear = false,
+        .fixed_mclk = 0
+    };
+
+    const i2s_pin_config_t pin_config = {
+        .bck_io_num = I2S_SCK_PIN,
+        .ws_io_num = I2S_WS_PIN,
+        .data_out_num = I2S_PIN_NO_CHANGE,
+        .data_in_num = I2S_SD_PIN
+    };
+
+    i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+    i2s_set_pin(I2S_PORT, &pin_config);
+}
+
+void setupOpus() {
+    int error;
+    encoder = opus_encoder_create(SAMPLE_RATE, 1, OPUS_APPLICATION_AUDIO, &error);
+    if (error != OPUS_OK) {
+        Serial.println("Failed to create OPUS encoder");
+        return;
+    }
+
+    opus_encoder_ctl(encoder, OPUS_SET_BITRATE(64000));
+    opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(10));
+    opus_encoder_ctl(encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
+
+    pcm = (opus_int16*)malloc(OPUS_FRAME_SIZE * sizeof(opus_int16));
+    opusData = (unsigned char*)malloc(OPUS_MAX_PACKET_SIZE);
+}
+
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+    switch(type) {
+        case WStype_DISCONNECTED:
+            Serial.printf("[%u] Disconnected!\n", num);
+            break;
+        case WStype_CONNECTED:
+            Serial.printf("[%u] Connected\n", num);
+            break;
+        case WStype_TEXT:
+            // Handle WebRTC signaling
+            break;
+        case WStype_BIN:
+            // Handle binary data
+            break;
+        case WStype_ERROR:
+            Serial.printf("[%u] Error!\n", num);
+            break;
+        case WStype_FRAGMENT_TEXT_START:
+        case WStype_FRAGMENT_BIN_START:
+        case WStype_FRAGMENT:
+        case WStype_FRAGMENT_FIN:
+            break;
+    }
+}
 
 void setup() {
     Serial.begin(115200);
     Serial.println("Configuring WiFi");
     WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid, pswd);
-    if (WiFi.waitForConnectResult() != WL_CONNECTED) {
-        Serial.println("WiFi Failed");
-        while (1) {
-            delay(1000);
-        }
-    }
-
-    // I2S CONFIG
-    Serial.println("Configuring I2S port");
-    esp_err_t err;
-    const i2s_config_t i2s_config = {
-        .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX), 
-        .sample_rate = 96000,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT, 
-        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,  
-        .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_STAND_I2S | I2S_COMM_FORMAT_STAND_MSB),
-        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 4,                    
-        .dma_buf_len = block_size,
-    };
-
-    // ESP32 GPIO PINS > I2S MIC PINS:
-    const i2s_pin_config_t pin_config = {
-        .bck_io_num = 26,   // > SCK
-        .ws_io_num = 25,    // > WS
-        .data_out_num = -1, // Serial Data Out is no connected
-        .data_in_num = 32,  // > SD
-    };
-
-    // CONFIGURE I2S DRIVER AND PINS.
-    err = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
-    if (err != ESP_OK) {
-        Serial.printf("Failed installing driver: %d\n", err);
-        while (true);
-    }
-
-    err = i2s_set_pin(I2S_PORT, &pin_config);
-    if (err != ESP_OK) {
-        Serial.printf("Failed setting pin: %d\n", err);
-        while (true);
-    }
-
-    Serial.println("I2S driver OK.");
-}
-
-int32_t buffer[512];    // Buffer
-volatile uint16_t rpt = 0; // Pointer
-
-int i2s_mic()
-{
-    uint32_t bytes_read = -1; // Reset bytes read
-    esp_err_t result = i2s_read(I2S_PORT, (char*)buffer + rpt, block_size, &bytes_read, portMAX_DELAY);
+    WiFi.begin(ssid, password);
     
-    if (result != ESP_OK) {
-        Serial.printf("I2S read failed: %d\n", result);
-        return 1; // Return error code
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("");
+    Serial.print("Connected to WiFi network with IP Address: ");
+    Serial.println(WiFi.localIP());
+
+    // Initialize SPIFFS
+    if(!SPIFFS.begin(true)) {
+        Serial.println("SPIFFS Mount Failed");
+        return;
     }
 
-    if (bytes_read < 0) {
-        Serial.printf("I2S read error: %d\n", bytes_read);
-        return 2; // Return error code
-    }
+    // Setup I2S
+    setupI2S();
+    
+    // Setup OPUS encoder
+    setupOpus();
 
-    if (bytes_read < block_size) {
-        Serial.printf("I2S read less than expected: %d\n", bytes_read);
-        return 3; // Return error code
-    }
+    // Setup web server
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(SPIFFS, "/index.html", "text/html");
+    });
 
-    rpt = rpt + bytes_read;
-    if (rpt > 2043) rpt = 0;
-
-    return 0; // Return success code
+    server.begin();
+    webSocket.begin();
+    webSocket.onEvent(webSocketEvent);
 }
-
 
 void loop() {
-    static uint8_t state = 0; 
-    int result = i2s_mic();
+    webSocket.loop();
 
-    if (result != 0) {
-        Serial.printf("Error reading I2S: %d\n", result);
-        return; // Exit loop on error
-    }
+    // Read I2S data
+    size_t bytesIn = 0;
+    i2s_read(I2S_PORT, sBuffer, bufferLen * sizeof(int16_t), &bytesIn, portMAX_DELAY);
 
-    if (!connected) {
-        if (udp.connect(udpAddress, udpPort)) {
-            connected = true;
-            Serial.println("Connected to UDP Listener");
-            Serial.println("Under Linux for listener use: netcat -u -p 16500 -l | play -t s16 -r 48000 -c 2 -");
-            Serial.println("Under Linux for recorder use: netcat -u -p 16500 -l | rec -t s16 -r 48000 -c 2 - file.mp3");
+    if (bytesIn > 0) {
+        // Convert to mono and normalize
+        for(int i = 0; i < bufferLen; i++) {
+            pcm[i] = sBuffer[i];
+        }
+
+        // Encode with OPUS
+        int encodedBytes = opus_encode(encoder, pcm, OPUS_FRAME_SIZE, opusData, OPUS_MAX_PACKET_SIZE);
+        
+        if (encodedBytes > 0) {
+            // Send encoded audio data through WebSocket
+            webSocket.broadcastBIN(opusData, encodedBytes);
         }
     }
-    else {
-        switch (state) {
-            case 0: // wait for index to pass halfway
-                if (rpt > 1023) {
-                state = 1;
-                }
-                break;
-            case 1: // send the first half of the buffer
-                state = 2;
-                udp.write( (uint8_t *)buffer, 1024);
-                break;
-            case 2: // wait for index to wrap
-                if (rpt < 1023) {
-                    state = 3;
-                }
-                break;
-            case 3: // send second half of the buffer
-                state = 0;
-                udp.write((uint8_t*)buffer+1024, 1024);
-                break;
-        }
-    }   
 }

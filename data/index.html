@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Audio Stream</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: Arial, sans-serif;
+        }
+        .container {
+            text-align: center;
+            color: #fff;
+        }
+        .player {
+            background-color: #1a1a1a;
+            padding: 2rem;
+            border-radius: 10px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+        .status {
+            margin-top: 1rem;
+            font-size: 0.9rem;
+            color: #888;
+        }
+        .controls {
+            margin-top: 1rem;
+        }
+        button {
+            background-color: #4CAF50;
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 4px 2px;
+            cursor: pointer;
+            border-radius: 5px;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="player">
+            <h1>ESP32 Audio Stream</h1>
+            <div class="controls">
+                <button id="startButton">Start Stream</button>
+                <button id="stopButton" disabled>Stop Stream</button>
+            </div>
+            <div class="status" id="status">Disconnected</div>
+        </div>
+    </div>
+
+    <script>
+        let peerConnection;
+        let audioContext;
+        let audioStream;
+        const statusElement = document.getElementById('status');
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+
+        async function startStream() {
+            try {
+                statusElement.textContent = 'Connecting...';
+                startButton.disabled = true;
+
+                // Create WebSocket connection
+                const ws = new WebSocket(`ws://${window.location.hostname}/ws`);
+
+                ws.onopen = () => {
+                    statusElement.textContent = 'Connected';
+                    stopButton.disabled = false;
+                };
+
+                ws.onclose = () => {
+                    statusElement.textContent = 'Disconnected';
+                    startButton.disabled = false;
+                    stopButton.disabled = true;
+                };
+
+                ws.onmessage = async (event) => {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'offer') {
+                        await handleOffer(data);
+                    }
+                };
+
+            } catch (error) {
+                console.error('Error starting stream:', error);
+                statusElement.textContent = 'Error: ' + error.message;
+                startButton.disabled = false;
+            }
+        }
+
+        async function handleOffer(offer) {
+            try {
+                const configuration = {
+                    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                };
+
+                peerConnection = new RTCPeerConnection(configuration);
+                
+                peerConnection.ontrack = (event) => {
+                    if (!audioContext) {
+                        audioContext = new AudioContext();
+                    }
+                    const audioElement = audioContext.createMediaStreamDestination();
+                    event.streams[0].getTracks().forEach(track => {
+                        audioElement.stream.addTrack(track);
+                    });
+                };
+
+                peerConnection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        ws.send(JSON.stringify({
+                            type: 'candidate',
+                            candidate: event.candidate
+                        }));
+                    }
+                };
+
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+
+                ws.send(JSON.stringify({
+                    type: 'answer',
+                    sdp: answer
+                }));
+
+            } catch (error) {
+                console.error('Error handling offer:', error);
+                statusElement.textContent = 'Error: ' + error.message;
+            }
+        }
+
+        function stopStream() {
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+            statusElement.textContent = 'Disconnected';
+            startButton.disabled = false;
+            stopButton.disabled = true;
+        }
+
+        startButton.addEventListener('click', startStream);
+        stopButton.addEventListener('click', stopStream);
+    </script>
+</body>
+</html> 
