@@ -3,90 +3,403 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP32 Audio Stream</title>
+    <title>ESP32 Hybrid Audio Stream</title>
     <style>
         body {
             margin: 0;
             padding: 0;
-            background-color: #000;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             display: flex;
             justify-content: center;
             align-items: center;
             min-height: 100vh;
-            font-family: Arial, sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: white;
         }
         .container {
             text-align: center;
-            color: #fff;
-        }
-        .player {
-            background-color: #1a1a1a;
+            background: rgba(0,0,0,0.3);
+            backdrop-filter: blur(10px);
             padding: 2rem;
-            border-radius: 10px;
-            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            min-width: 600px;
         }
         .status {
-            margin-top: 1rem;
-            font-size: 0.9rem;
-            color: #888;
+            margin: 1rem 0;
+            padding: 0.8rem;
+            border-radius: 10px;
+            background: rgba(0,0,0,0.2);
+            font-size: 1.1rem;
         }
         .controls {
-            margin-top: 1rem;
+            margin: 1.5rem 0;
         }
         button {
-            background-color: #4CAF50;
+            background: linear-gradient(45deg, #4CAF50, #45a049);
             border: none;
             color: white;
-            padding: 10px 20px;
-            text-align: center;
-            text-decoration: none;
-            display: inline-block;
-            font-size: 16px;
-            margin: 4px 2px;
+            padding: 15px 30px;
+            margin: 0.5rem;
+            border-radius: 25px;
             cursor: pointer;
-            border-radius: 5px;
-            transition: background-color 0.3s;
+            transition: all 0.3s ease;
+            font-size: 16px;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 1px;
         }
-        button:hover {
-            background-color: #45a049;
+        button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
         }
         button:disabled {
-            background-color: #cccccc;
+            background: #666;
             cursor: not-allowed;
+            transform: none;
         }
+        .connection-info {
+            background: rgba(0,0,0,0.4);
+            padding: 1rem;
+            border-radius: 10px;
+            margin: 1rem 0;
+            font-size: 0.9rem;
+        }
+        .equalizer {
+            display: flex;
+            justify-content: center;
+            align-items: end;
+            height: 120px;
+            margin: 2rem 0;
+            gap: 3px;
+        }
+        .eq-bar {
+            width: 12px;
+            background: linear-gradient(to top, #4CAF50, #2196F3, #FF9800, #E91E63);
+            border-radius: 6px 6px 0 0;
+            transition: height 0.1s ease;
+            min-height: 3px;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 1rem;
+            margin-top: 2rem;
+            text-align: left;
+        }
+        .stat-item {
+            background: rgba(0,0,0,0.2);
+            padding: 1rem;
+            border-radius: 12px;
+        }
+        .stat-label {
+            font-size: 0.8rem;
+            opacity: 0.8;
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .stat-value {
+            font-size: 1.2rem;
+            font-weight: bold;
+            color: #4CAF50;
+        }
+        .volume-control {
+            margin: 1rem 0;
+        }
+        .volume-slider {
+            width: 200px;
+            margin: 0 1rem;
+        }
+        .connection-type {
+            display: inline-block;
+            padding: 0.3rem 0.8rem;
+            margin: 0.2rem;
+            border-radius: 15px;
+            font-size: 0.8rem;
+        }
+        .udp { background: #FF9800; }
+        .websocket { background: #2196F3; }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="player">
-            <h1>ESP32 Audio Stream</h1>
-            <div class="controls">
-                <button id="startButton">Start Stream</button>
-                <button id="stopButton" disabled>Stop Stream</button>
+        <h1>🎵 ESP32 Hybrid Stream</h1>
+        
+        <div class="connection-info">
+            <div>📡 <strong>Audio:</strong> 
+                <span class="connection-type udp">UDP Broadcast</span> + 
+                <span class="connection-type websocket">WebSocket Fallback</span>
             </div>
-            <div class="status" id="status">Disconnected</div>
+            <div>📊 <strong>Statistics:</strong> 
+                <span class="connection-type websocket">WebSocket Real-time</span>
+            </div>
+        </div>
+        
+            <div class="controls">
+            <button id="startButton">🎧 Start Stream</button>
+            <button id="stopButton" disabled>⏹️ Stop Stream</button>
+        </div>
+        
+        <div class="volume-control">
+            <label>🔊 Volume: </label>
+            <input type="range" id="volumeSlider" class="volume-slider" min="0" max="100" value="50">
+            <span id="volumeValue">50%</span>
+        </div>
+        
+        <div class="status" id="status">Ready to connect</div>
+        
+        <div class="equalizer" id="equalizer">
+            <!-- Equalizer bars will be generated by JavaScript -->
+        </div>
+        
+        <div class="stats" id="stats">
+            <div class="stat-item">
+                <div class="stat-label">Packets/Sec</div>
+                <div class="stat-value" id="packetsPerSec">0</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">Data Rate</div>
+                <div class="stat-value" id="dataRate">0 KB/s</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">Compression</div>
+                <div class="stat-value" id="compression">0x</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">RMS Level</div>
+                <div class="stat-value" id="rmsLevel">0</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">Uptime</div>
+                <div class="stat-value" id="uptime">0s</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">Clients</div>
+                <div class="stat-value" id="connectedClients">0</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">UDP Drops</div>
+                <div class="stat-value" id="udpDrops">0</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">Total Packets</div>
+                <div class="stat-value" id="totalPackets">0</div>
+            </div>
         </div>
     </div>
 
-    <script>
-        let websocket;
+    <script type="module">
+        let wsStats;
+        let wsAudio;
         let audioContext;
         let opusDecoder;
+        let gainNode;
+        let nextPlayTime = 0;
+        let audioQueue = [];
+        let isProcessingQueue = false;
+        
         const statusElement = document.getElementById('status');
         const startButton = document.getElementById('startButton');
         const stopButton = document.getElementById('stopButton');
-        let isPlaying = false;
-
+        const equalizerElement = document.getElementById('equalizer');
+        const volumeSlider = document.getElementById('volumeSlider');
+        const volumeValue = document.getElementById('volumeValue');
+        
+        // Create equalizer bars
+        function createEqualizer() {
+            equalizerElement.innerHTML = '';
+            for (let i = 0; i < 30; i++) {
+                const bar = document.createElement('div');
+                bar.className = 'eq-bar';
+                bar.style.height = '3px';
+                equalizerElement.appendChild(bar);
+            }
+        }
+        
+        // Animate equalizer based on audio level
+        function animateEqualizer(rmsLevel) {
+            const bars = equalizerElement.children;
+            const normalizedLevel = Math.min(rmsLevel / 2000, 1);
+            
+            for (let i = 0; i < bars.length; i++) {
+                const barHeight = Math.random() * normalizedLevel * 100 + 3;
+                bars[i].style.height = `${barHeight}px`;
+            }
+        }
+        
+        // Update statistics display
+        function updateStats(stats) {
+            document.getElementById('packetsPerSec').textContent = stats.packetsPerSec || 0;
+            document.getElementById('dataRate').textContent = `${((stats.bytesPerSec || 0) / 1024).toFixed(1)} KB/s`;
+            document.getElementById('compression').textContent = `${(stats.compressionRatio || 0).toFixed(1)}x`;
+            document.getElementById('rmsLevel').textContent = stats.rmsLevel || 0;
+            document.getElementById('uptime').textContent = `${stats.uptime || 0}s`;
+            document.getElementById('connectedClients').textContent = stats.connectedClients || 0;
+            document.getElementById('udpDrops').textContent = stats.udpPacketsDropped || 0;
+            document.getElementById('totalPackets').textContent = stats.totalPackets || 0;
+            
+            // Animate equalizer
+            animateEqualizer(stats.rmsLevel || 0);
+        }
+        
+        // Handle UDP audio packet (from WebSocket fallback)
+        async function handleAudioPacket(arrayBuffer) {
+            try {
+                const dataView = new DataView(arrayBuffer);
+                const magic = dataView.getUint32(0, true);
+                const sequence = dataView.getUint32(4, true);
+                const timestamp = dataView.getUint32(8, true);
+                const dataSize = dataView.getUint16(12, true);
+                const codec = dataView.getUint8(14);
+                const channels = dataView.getUint8(15);
+                const sampleRate = dataView.getUint32(16, true);
+                
+                // Verify magic number
+                if (magic !== 0xA0D10001) {
+                    console.warn('Invalid audio packet magic:', magic.toString(16));
+                    return;
+                }
+                
+                // Extract audio data
+                const audioData = new Uint8Array(arrayBuffer, 20, dataSize);
+                
+                if (codec === 1 && opusDecoder) { // OPUS
+                    const pcmData = opusDecoder.decode(audioData);
+                    if (pcmData && pcmData.length > 0) {
+                        audioQueue.push(pcmData);
+                        if (!isProcessingQueue) {
+                            processAudioQueue();
+                        }
+                    }
+                }
+                
+            } catch (error) {
+                console.error('Error handling audio packet:', error);
+            }
+        }
+        
+        // Process audio queue for smooth playback
+        function processAudioQueue() {
+            if (audioQueue.length === 0) {
+                isProcessingQueue = false;
+                return;
+            }
+            
+            isProcessingQueue = true;
+            const pcmData = audioQueue.shift();
+            
+            // Convert Int16 PCM to Float32 for Web Audio API
+            const float32Data = new Float32Array(pcmData.length);
+            for (let i = 0; i < pcmData.length; i++) {
+                float32Data[i] = pcmData[i] / 32768.0;
+            }
+            
+            // Create audio buffer and schedule playback
+            const audioBuffer = audioContext.createBuffer(1, float32Data.length, 48000);
+            audioBuffer.copyToChannel(float32Data, 0);
+            
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(gainNode);
+            
+            // Schedule audio to prevent gaps/overlaps
+            const now = audioContext.currentTime;
+            const startTime = Math.max(now, nextPlayTime);
+            
+            source.start(startTime);
+            nextPlayTime = startTime + audioBuffer.duration;
+            
+            // Schedule next buffer processing
+            const nextProcessDelay = Math.max(0, (startTime - now) * 1000 + audioBuffer.duration * 1000 - 5);
+            setTimeout(() => processAudioQueue(), nextProcessDelay);
+        }
+        
+        // Start audio stream
         async function startStream() {
             try {
-                statusElement.textContent = 'Initializing...';
+                statusElement.textContent = 'Initializing audio context...';
                 startButton.disabled = true;
 
                 // Create audio context
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 
-                statusElement.textContent = 'Connecting...';
-                connectWebSocket();
+                // Create gain node for volume control
+                gainNode = audioContext.createGain();
+                gainNode.connect(audioContext.destination);
+                gainNode.gain.value = volumeSlider.value / 100;
+                
+                statusElement.textContent = 'Loading OPUS decoder...';
+                
+                // Load OPUS decoder
+                const LibOpus = await import('https://cdn.jsdelivr.net/npm/libopusjs@0.0.11/dist/libopus.esm.js');
+                const Opus = await LibOpus.default();
+                opusDecoder = new Opus.OpusDecoder(48000, 1);
+                
+                statusElement.textContent = 'Connecting to ESP32...';
+                
+                // Connect to statistics WebSocket
+                wsStats = new WebSocket(`ws://${window.location.hostname}/stats`);
+                wsStats.binaryType = 'arraybuffer';
+                
+                wsStats.onopen = () => {
+                    console.log('Statistics WebSocket connected');
+                    statusElement.textContent = 'Connected to statistics...';
+                    
+                    // Connect to audio WebSocket
+                    wsAudio = new WebSocket(`ws://${window.location.hostname}/audio`);
+                    wsAudio.binaryType = 'arraybuffer';
+                    
+                    wsAudio.onopen = () => {
+                        console.log('Audio WebSocket connected');
+                        statusElement.textContent = '🎵 Connected - Receiving Audio & Stats';
+                    stopButton.disabled = false;
+                };
+
+                    wsAudio.onmessage = async (event) => {
+                        if (event.data instanceof ArrayBuffer) {
+                            await handleAudioPacket(event.data);
+                        }
+                    };
+                    
+                    wsAudio.onclose = () => {
+                        console.log('Audio WebSocket disconnected');
+                        if (statusElement.textContent.includes('Connected')) {
+                            statusElement.textContent = 'Audio connection lost';
+                        }
+                    };
+                };
+                
+                wsStats.onmessage = (event) => {
+                    if (event.data instanceof ArrayBuffer) {
+                        const dataView = new DataView(event.data);
+                        const decoder = new TextDecoder();
+                        const type = decoder.decode(new Uint8Array(event.data, 0, 8)).replace(/\0/g, '');
+                        
+                        if (type === 'stats') {
+                            // Parse statistics structure
+                            const stats = {
+                                packetsPerSec: dataView.getUint32(8, true),
+                                bytesPerSec: dataView.getUint32(12, true),
+                                totalPackets: dataView.getUint32(16, true),
+                                totalBytes: dataView.getUint32(20, true),
+                                compressionRatio: dataView.getFloat32(24, true),
+                                uptime: dataView.getUint32(28, true),
+                                rmsLevel: dataView.getUint16(32, true),
+                                connectedClients: dataView.getUint8(34),
+                                udpPacketsDropped: dataView.getUint32(35, true)
+                            };
+                            updateStats(stats);
+                        }
+                    }
+                };
+                
+                wsStats.onclose = () => {
+                    console.log('Statistics WebSocket disconnected');
+                    if (statusElement.textContent.includes('Connected')) {
+                        statusElement.textContent = 'Statistics connection lost';
+                    }
+                };
 
             } catch (error) {
                 console.error('Error starting stream:', error);
@@ -95,120 +408,57 @@
             }
         }
 
-        function connectWebSocket() {
-            try {
-                // Create WebSocket connection
-                websocket = new WebSocket(`ws://${window.location.hostname}/ws`);
-                websocket.binaryType = 'arraybuffer';
-
-                websocket.onopen = () => {
-                    statusElement.textContent = 'Connected - Receiving Audio';
-                    stopButton.disabled = false;
-                };
-
-                websocket.onclose = () => {
-                    statusElement.textContent = 'Disconnected';
-                    startButton.disabled = false;
-                    stopButton.disabled = true;
-                };
-
-                websocket.onerror = (error) => {
-                    console.error('WebSocket error:', error);
-                    statusElement.textContent = 'Connection Error';
-                    startButton.disabled = false;
-                    stopButton.disabled = true;
-                };
-
-                websocket.onmessage = async (event) => {
-                    if (event.data instanceof ArrayBuffer) {
-                        await handleAudioData(event.data);
-                    }
-                };
-
-            } catch (error) {
-                console.error('WebSocket connection error:', error);
-                statusElement.textContent = 'Connection Error: ' + error.message;
-                startButton.disabled = false;
-            }
-        }
-
-        let nextPlayTime = 0;
-        let audioQueue = [];
-        let isProcessingQueue = false;
-
-        async function handleAudioData(pcmData) {
-            try {
-                // Convert raw PCM data (Int16) to Float32Array for Web Audio API
-                const int16Array = new Int16Array(pcmData);
-                const float32Data = new Float32Array(int16Array.length);
-                
-                for (let i = 0; i < int16Array.length; i++) {
-                    float32Data[i] = int16Array[i] / 32768.0; // Convert from int16 to float32
-                }
-
-                // Add to queue for processing
-                audioQueue.push(float32Data);
-                
-                // Process queue if not already processing
-                if (!isProcessingQueue) {
-                    processAudioQueue();
-                }
-
-            } catch (error) {
-                console.error('Error processing audio data:', error);
-            }
-        }
-
-        function processAudioQueue() {
-            if (audioQueue.length === 0) {
-                isProcessingQueue = false;
-                return;
-            }
-            
-            isProcessingQueue = true;
-            
-            const float32Data = audioQueue.shift();
-            
-            // Create audio buffer from PCM data
-            const audioBuffer = audioContext.createBuffer(1, float32Data.length, 96000);
-            audioBuffer.copyToChannel(float32Data, 0);
-
-            // Schedule audio playback to prevent overlapping
-            const source = audioContext.createBufferSource();
-            source.buffer = audioBuffer;
-            source.connect(audioContext.destination);
-            
-            // Calculate when to start this chunk
-            const now = audioContext.currentTime;
-            const startTime = Math.max(now, nextPlayTime);
-            
-            source.start(startTime);
-            
-            // Update next play time
-            nextPlayTime = startTime + audioBuffer.duration;
-            
-            // Schedule next buffer processing
-            const nextProcessTime = (startTime - now) * 1000 + audioBuffer.duration * 1000;
-            setTimeout(() => processAudioQueue(), Math.max(0, nextProcessTime - 5));
-        }
-
+        // Stop audio stream
         function stopStream() {
-            if (websocket) {
-                websocket.close();
-                websocket = null;
+            if (wsStats) {
+                wsStats.close();
+                wsStats = null;
             }
+            
+            if (wsAudio) {
+                wsAudio.close();
+                wsAudio = null;
+            }
+            
             if (audioContext) {
                 audioContext.close();
                 audioContext = null;
             }
-            statusElement.textContent = 'Disconnected';
+            
+            if (opusDecoder) {
+                opusDecoder.destroy();
+                opusDecoder = null;
+            }
+            
+            // Reset variables
+            audioQueue = [];
+            isProcessingQueue = false;
+            nextPlayTime = 0;
+            
+            statusElement.textContent = 'Ready to connect';
             startButton.disabled = false;
             stopButton.disabled = true;
-            isPlaying = false;
-            audioQueue = [];
-            nextPlayTime = 0; // Reset audio timing
+            
+            // Reset equalizer
+            const bars = equalizerElement.children;
+            for (let bar of bars) {
+                bar.style.height = '3px';
+            }
         }
-
+        
+        // Volume control
+        volumeSlider.addEventListener('input', (e) => {
+            const volume = e.target.value / 100;
+            volumeValue.textContent = `${e.target.value}%`;
+            if (gainNode) {
+                gainNode.gain.value = volume;
+            }
+        });
+        
+        // Initialize
+        createEqualizer();
+        
+        // Event listeners
         startButton.addEventListener('click', startStream);
         stopButton.addEventListener('click', stopStream);
     </script>
