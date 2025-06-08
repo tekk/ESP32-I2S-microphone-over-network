@@ -69,38 +69,24 @@
     </div>
 
     <script>
-        let peerConnection;
+        let websocket;
         let audioContext;
-        let audioStream;
+        let opusDecoder;
         const statusElement = document.getElementById('status');
         const startButton = document.getElementById('startButton');
         const stopButton = document.getElementById('stopButton');
+        let isPlaying = false;
 
         async function startStream() {
             try {
-                statusElement.textContent = 'Connecting...';
+                statusElement.textContent = 'Initializing...';
                 startButton.disabled = true;
 
-                // Create WebSocket connection
-                const ws = new WebSocket(`ws://${window.location.hostname}/ws`);
-
-                ws.onopen = () => {
-                    statusElement.textContent = 'Connected';
-                    stopButton.disabled = false;
-                };
-
-                ws.onclose = () => {
-                    statusElement.textContent = 'Disconnected';
-                    startButton.disabled = false;
-                    stopButton.disabled = true;
-                };
-
-                ws.onmessage = async (event) => {
-                    const data = JSON.parse(event.data);
-                    if (data.type === 'offer') {
-                        await handleOffer(data);
-                    }
-                };
+                // Create audio context
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                
+                statusElement.textContent = 'Connecting...';
+                connectWebSocket();
 
             } catch (error) {
                 console.error('Error starting stream:', error);
@@ -109,52 +95,107 @@
             }
         }
 
-        async function handleOffer(offer) {
+        function connectWebSocket() {
             try {
-                const configuration = {
-                    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                // Create WebSocket connection
+                websocket = new WebSocket(`ws://${window.location.hostname}/ws`);
+                websocket.binaryType = 'arraybuffer';
+
+                websocket.onopen = () => {
+                    statusElement.textContent = 'Connected - Receiving Audio';
+                    stopButton.disabled = false;
                 };
 
-                peerConnection = new RTCPeerConnection(configuration);
-                
-                peerConnection.ontrack = (event) => {
-                    if (!audioContext) {
-                        audioContext = new AudioContext();
+                websocket.onclose = () => {
+                    statusElement.textContent = 'Disconnected';
+                    startButton.disabled = false;
+                    stopButton.disabled = true;
+                };
+
+                websocket.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    statusElement.textContent = 'Connection Error';
+                    startButton.disabled = false;
+                    stopButton.disabled = true;
+                };
+
+                websocket.onmessage = async (event) => {
+                    if (event.data instanceof ArrayBuffer) {
+                        await handleAudioData(event.data);
                     }
-                    const audioElement = audioContext.createMediaStreamDestination();
-                    event.streams[0].getTracks().forEach(track => {
-                        audioElement.stream.addTrack(track);
-                    });
                 };
-
-                peerConnection.onicecandidate = (event) => {
-                    if (event.candidate) {
-                        ws.send(JSON.stringify({
-                            type: 'candidate',
-                            candidate: event.candidate
-                        }));
-                    }
-                };
-
-                await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-                const answer = await peerConnection.createAnswer();
-                await peerConnection.setLocalDescription(answer);
-
-                ws.send(JSON.stringify({
-                    type: 'answer',
-                    sdp: answer
-                }));
 
             } catch (error) {
-                console.error('Error handling offer:', error);
-                statusElement.textContent = 'Error: ' + error.message;
+                console.error('WebSocket connection error:', error);
+                statusElement.textContent = 'Connection Error: ' + error.message;
+                startButton.disabled = false;
             }
         }
 
+        let nextPlayTime = 0;
+        let audioQueue = [];
+        let isProcessingQueue = false;
+
+        async function handleAudioData(pcmData) {
+            try {
+                // Convert raw PCM data (Int16) to Float32Array for Web Audio API
+                const int16Array = new Int16Array(pcmData);
+                const float32Data = new Float32Array(int16Array.length);
+                
+                for (let i = 0; i < int16Array.length; i++) {
+                    float32Data[i] = int16Array[i] / 32768.0; // Convert from int16 to float32
+                }
+
+                // Add to queue for processing
+                audioQueue.push(float32Data);
+                
+                // Process queue if not already processing
+                if (!isProcessingQueue) {
+                    processAudioQueue();
+                }
+
+            } catch (error) {
+                console.error('Error processing audio data:', error);
+            }
+        }
+
+        function processAudioQueue() {
+            if (audioQueue.length === 0) {
+                isProcessingQueue = false;
+                return;
+            }
+            
+            isProcessingQueue = true;
+            
+            const float32Data = audioQueue.shift();
+            
+            // Create audio buffer from PCM data
+            const audioBuffer = audioContext.createBuffer(1, float32Data.length, 96000);
+            audioBuffer.copyToChannel(float32Data, 0);
+
+            // Schedule audio playback to prevent overlapping
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+            
+            // Calculate when to start this chunk
+            const now = audioContext.currentTime;
+            const startTime = Math.max(now, nextPlayTime);
+            
+            source.start(startTime);
+            
+            // Update next play time
+            nextPlayTime = startTime + audioBuffer.duration;
+            
+            // Schedule next buffer processing
+            const nextProcessTime = (startTime - now) * 1000 + audioBuffer.duration * 1000;
+            setTimeout(() => processAudioQueue(), Math.max(0, nextProcessTime - 5));
+        }
+
         function stopStream() {
-            if (peerConnection) {
-                peerConnection.close();
-                peerConnection = null;
+            if (websocket) {
+                websocket.close();
+                websocket = null;
             }
             if (audioContext) {
                 audioContext.close();
@@ -163,6 +204,9 @@
             statusElement.textContent = 'Disconnected';
             startButton.disabled = false;
             stopButton.disabled = true;
+            isPlaying = false;
+            audioQueue = [];
+            nextPlayTime = 0; // Reset audio timing
         }
 
         startButton.addEventListener('click', startStream);
