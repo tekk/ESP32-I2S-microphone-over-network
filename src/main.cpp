@@ -23,9 +23,12 @@
 #include <ESPAsyncWebServer.h>
 #include <AsyncWebSocket.h>
 #include <LittleFS.h>
+#include <WiFiUdp.h>
+#include <opus.h>
 #include <driver/i2s.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <ArduinoJson.h>
 #include "wifi_config.h"
 
 // I2S Configuration
@@ -41,40 +44,85 @@
 #define I2S_PORT I2S_NUM_0
 #endif
 
-#define SAMPLE_RATE 96000
+#define SAMPLE_RATE 48000
 #define SAMPLE_BITS I2S_BITS_PER_SAMPLE_16BIT
-#define AUDIO_BUFFER_SIZE 4800  // Larger buffer: ~50ms worth of audio (96000 * 0.05)
-#define NUM_BUFFERS 2           // Double buffering
-#define TASK_STACK_SIZE 16384   // Reduced stack size
-#define WEBSOCKET_INTERVAL 50   // Send WebSocket data every 50ms (20 packets/sec)
+#define OPUS_FRAME_SIZE 960  // 20ms at 48kHz
+#define NUM_BUFFERS 4        // Quad buffering
+#define BUFFER_SIZE_SAMPLES (OPUS_FRAME_SIZE * 2)  // 1920 samples (~40ms)
+#define UDP_AUDIO_PORT 5555
+#define UDP_STATS_PORT 5556
+#define TASK_STACK_SIZE 16384
+#define AUDIO_SEND_INTERVAL 20  // Send every 20ms (50 packets/sec)
+#define STATS_SEND_INTERVAL 500 // Send stats every 500ms
+#define AUDIO_MAGIC 0xA0D10001  // Fixed magic number
 
-// WebSocket and HTTP server
+// UDP Audio packet structure
+struct UdpAudioPacket {
+    uint32_t magic;         // 0xA0D10001
+    uint32_t sequence;
+    uint32_t timestamp;
+    uint16_t dataSize;
+    uint8_t codec;          // 0=PCM, 1=OPUS
+    uint8_t channels;
+    uint32_t sampleRate;
+    uint8_t data[];
+} __attribute__((packed));
+
+// Statistics structure
+struct AudioStats {
+    uint32_t packetsPerSec;
+    uint32_t bytesPerSec;
+    uint32_t totalPackets;
+    uint32_t totalBytes;
+    float compressionRatio;
+    uint32_t uptime;
+    uint16_t rmsLevel;
+    uint8_t connectedClients;
+    uint32_t udpPacketsDropped;
+} stats;
+
+// WebSocket statistics message
+struct WsStatsMessage {
+    char type[8];           // "stats"
+    AudioStats data;
+} __attribute__((packed));
+
+// Global variables
 AsyncWebServer server(80);
-AsyncWebSocket ws("/ws");
-
-// Double buffering for audio
+AsyncWebSocket wsStats("/stats");    // WebSocket for statistics
+AsyncWebSocket wsAudio("/audio");    // WebSocket for audio (browser fallback)
+WiFiUDP udpAudio;
+OpusEncoder* encoder;
 int16_t* audioBuffers[NUM_BUFFERS];
-volatile int currentBuffer = 0;
-volatile bool bufferReady[NUM_BUFFERS] = {false, false};
+volatile int writeBuffer = 0;
+volatile int readBuffer = 0;
+volatile bool bufferReady[NUM_BUFFERS] = {false};
 SemaphoreHandle_t bufferSemaphore;
+
+uint32_t packetSequence = 0;
+uint32_t lastStatsUpdate = 0;
+uint32_t lastAudioSend = 0;
+uint32_t sessionStartTime = 0;
+uint32_t packetsThisSecond = 0;
+uint32_t bytesThisSecond = 0;
+uint32_t udpDropped = 0;
 
 // Function declarations
 void audioTask(void *parameter);
-void mainLoopTask(void *parameter);
+void transmitTask(void *parameter);
+void statsTask(void *parameter);
+uint16_t calculateRMS(int16_t* buffer, size_t samples);
 
 esp_err_t setupI2S() {
-    
-    esp_err_t err = ESP_OK;
-
     const i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
         .sample_rate = SAMPLE_RATE,
         .bits_per_sample = (i2s_bits_per_sample_t)SAMPLE_BITS,
         .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-        .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_STAND_I2S | I2S_COMM_FORMAT_STAND_MSB),
+        .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_STAND_I2S),
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 16, // Maximum DMA buffers for smoothest audio
-        .dma_buf_len = 128   // Maximum DMA buffer length
+        .dma_buf_count = 8,
+        .dma_buf_len = 256
     };
 
     const i2s_pin_config_t pin_config = {
@@ -84,57 +132,168 @@ esp_err_t setupI2S() {
         .data_in_num = I2S_SD_PIN
     };
 
-    err = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
-
-    if (err != ESP_OK) {
-        Serial.printf("Failed to install I2S driver: %d\n", err);
-        return err;
-    }
-
-    err = i2s_set_pin(I2S_PORT, &pin_config);
-
-    if (err != ESP_OK) {
-        Serial.printf("Failed to set I2S pins: %d\n", err);
-        return err;
-    }
-
-    return err;
+    esp_err_t err = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+    if (err != ESP_OK) return err;
+    
+    return i2s_set_pin(I2S_PORT, &pin_config);
 }
 
 void audioTask(void *parameter) {
     while(1) {
-        // Read I2S data into current buffer
         size_t bytesRead = 0;
-        int bufferIndex = currentBuffer;
-        i2s_read(I2S_PORT, audioBuffers[bufferIndex], AUDIO_BUFFER_SIZE * sizeof(int16_t), &bytesRead, portMAX_DELAY);
+        i2s_read(I2S_PORT, audioBuffers[writeBuffer], BUFFER_SIZE_SAMPLES * sizeof(int16_t), &bytesRead, portMAX_DELAY);
 
         if (bytesRead > 0) {
-            // Mark buffer as ready
-            bufferReady[bufferIndex] = true;
-            
-            // Switch to next buffer
-            currentBuffer = (currentBuffer + 1) % NUM_BUFFERS;
-            
-            // Signal that a buffer is ready
+            bufferReady[writeBuffer] = true;
+            writeBuffer = (writeBuffer + 1) % NUM_BUFFERS;
             xSemaphoreGive(bufferSemaphore);
         }
         
-        // Small delay to prevent tight loop
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
-void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventType type, void * arg, uint8_t *data, size_t len) {
+void transmitTask(void *parameter) {
+    uint8_t opusBuffer[512];
+    
+    while(1) {
+        if (xSemaphoreTake(bufferSemaphore, pdMS_TO_TICKS(100)) == pdTRUE) {
+            if (bufferReady[readBuffer]) {
+                bufferReady[readBuffer] = false;
+                
+                uint32_t currentTime = millis();
+                
+                // Rate limiting for audio transmission
+                if ((currentTime - lastAudioSend) >= AUDIO_SEND_INTERVAL) {
+                    // Calculate RMS for statistics
+                    stats.rmsLevel = calculateRMS(audioBuffers[readBuffer], OPUS_FRAME_SIZE);
+                    
+                    // Encode OPUS frame (960 samples = 20ms)
+                    int encodedSize = opus_encode(encoder, audioBuffers[readBuffer], OPUS_FRAME_SIZE, opusBuffer, sizeof(opusBuffer));
+                    
+                    if (encodedSize > 0) {
+                        // Create UDP packet
+                        size_t packetSize = sizeof(UdpAudioPacket) + encodedSize;
+                        uint8_t* packet = (uint8_t*)malloc(packetSize);
+                        UdpAudioPacket* audioPacket = (UdpAudioPacket*)packet;
+                        
+                        audioPacket->magic = AUDIO_MAGIC;
+                        audioPacket->sequence = packetSequence++;
+                        audioPacket->timestamp = currentTime;
+                        audioPacket->dataSize = encodedSize;
+                        audioPacket->codec = 1; // OPUS
+                        audioPacket->channels = 1;
+                        audioPacket->sampleRate = SAMPLE_RATE;
+                        memcpy(audioPacket->data, opusBuffer, encodedSize);
+                        
+                        // Broadcast via UDP
+                        udpAudio.beginPacket(IPAddress(255,255,255,255), UDP_AUDIO_PORT);
+                        size_t written = udpAudio.write(packet, packetSize);
+                        bool udpSuccess = udpAudio.endPacket();
+                        
+                        if (!udpSuccess || written != packetSize) {
+                            udpDropped++;
+                        }
+                        
+                        // Also send via WebSocket for browser compatibility
+                        if (wsAudio.count() > 0) {
+                            wsAudio.binaryAll(packet, packetSize);
+                        }
+                        
+                        // Update statistics
+                        packetsThisSecond++;
+                        bytesThisSecond += packetSize;
+                        stats.totalPackets++;
+                        stats.totalBytes += packetSize;
+                        stats.compressionRatio = (float)(OPUS_FRAME_SIZE * 2) / encodedSize;
+                        stats.udpPacketsDropped = udpDropped;
+                        
+                        free(packet);
+                        lastAudioSend = currentTime;
+                    }
+                }
+                readBuffer = (readBuffer + 1) % NUM_BUFFERS;
+            }
+        }
+    }
+}
+
+void statsTask(void *parameter) {
+    while(1) {
+        uint32_t now = millis();
+        
+        if (now - lastStatsUpdate >= STATS_SEND_INTERVAL) {
+            // Update statistics
+            stats.packetsPerSec = packetsThisSecond * (1000 / STATS_SEND_INTERVAL);
+            stats.bytesPerSec = bytesThisSecond * (1000 / STATS_SEND_INTERVAL);
+            stats.uptime = (now - sessionStartTime) / 1000;
+            stats.connectedClients = wsStats.count() + wsAudio.count();
+            
+            // Send statistics via WebSocket
+            if (wsStats.count() > 0) {
+                WsStatsMessage statsMsg;
+                strcpy(statsMsg.type, "stats");
+                statsMsg.data = stats;
+                wsStats.binaryAll((uint8_t*)&statsMsg, sizeof(statsMsg));
+            }
+            
+            // Reset counters
+            packetsThisSecond = 0;
+            bytesThisSecond = 0;
+            lastStatsUpdate = now;
+            
+            // Debug output
+            Serial.printf("Stats: %d pps, %.1f KB/s, RMS: %d, Clients: %d, UDP drops: %d\n", 
+                         stats.packetsPerSec, stats.bytesPerSec/1024.0, stats.rmsLevel, 
+                         stats.connectedClients, stats.udpPacketsDropped);
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+uint16_t calculateRMS(int16_t* buffer, size_t samples) {
+    uint64_t sum = 0;
+    for (size_t i = 0; i < samples; i++) {
+        int32_t sample = buffer[i];
+        sum += sample * sample;
+    }
+    return (uint16_t)sqrt(sum / samples);
+}
+
+void onWsStatsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventType type, void * arg, uint8_t *data, size_t len) {
     switch(type) {
         case WS_EVT_CONNECT:
-            Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+            Serial.printf("Stats WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+            // Send initial stats immediately
+            if (wsStats.count() > 0) {
+                WsStatsMessage statsMsg;
+                strcpy(statsMsg.type, "stats");
+                statsMsg.data = stats;
+                client->binary((uint8_t*)&statsMsg, sizeof(statsMsg));
+            }
             break;
         case WS_EVT_DISCONNECT:
-            Serial.printf("WebSocket client #%u disconnected\n", client->id());
+            Serial.printf("Stats WebSocket client #%u disconnected\n", client->id());
             break;
         case WS_EVT_DATA:
-            // Handle incoming WebSocket data
+            // Handle incoming commands if needed
             break;
+        case WS_EVT_PONG:
+        case WS_EVT_ERROR:
+            break;
+    }
+}
+
+void onWsAudioEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventType type, void * arg, uint8_t *data, size_t len) {
+    switch(type) {
+        case WS_EVT_CONNECT:
+            Serial.printf("Audio WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+            break;
+        case WS_EVT_DISCONNECT:
+            Serial.printf("Audio WebSocket client #%u disconnected\n", client->id());
+            break;
+        case WS_EVT_DATA:
         case WS_EVT_PONG:
         case WS_EVT_ERROR:
             break;
@@ -143,146 +302,116 @@ void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventT
 
 void setup() {
     Serial.begin(115200);
-    Serial.println("Configuring WiFi");
+    Serial.println("ESP32 Hybrid Audio Streamer Starting...");
+    Serial.println("UDP Audio + WebSocket Statistics");
+    
+    // Initialize WiFi
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid, password);
-    
     while (WiFi.status() != WL_CONNECTED) {
         delay(500);
         Serial.print(".");
     }
-    Serial.println();
-    Serial.print("Connected to WiFi network with IP Address: ");
-    Serial.println(WiFi.localIP());
+    Serial.printf("\nConnected to WiFi: %s\n", WiFi.localIP().toString().c_str());
 
     // Initialize LittleFS
     if(!LittleFS.begin(true)) {
         Serial.println("LittleFS Mount Failed");
         return;
-    } else {
-        Serial.println("LittleFS Mounted");
     }
 
     // Setup I2S
-    esp_err_t err = setupI2S();
-    if (err != ESP_OK) {
-        Serial.printf("Failed to setup I2S: %d\n", err);
+    if (setupI2S() != ESP_OK) {
+        Serial.println("Failed to setup I2S");
         return;
-    } else {
-        Serial.println("I2S Setup Success");
     }
-    
-    // Allocate double buffers for raw PCM data
+    Serial.println("I2S initialized successfully");
+
+    // Initialize OPUS encoder
+    int error;
+    encoder = opus_encoder_create(SAMPLE_RATE, 1, OPUS_APPLICATION_AUDIO, &error);
+    if (!encoder || error != OPUS_OK) {
+        Serial.printf("Failed to create OPUS encoder: %d\n", error);
+        return;
+    }
+    opus_encoder_ctl(encoder, OPUS_SET_BITRATE(128000));
+    opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(7));
+    opus_encoder_ctl(encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
+    Serial.println("OPUS encoder initialized (128kbps, complexity 7)");
+
+    // Allocate audio buffers
     for (int i = 0; i < NUM_BUFFERS; i++) {
-        audioBuffers[i] = (int16_t*)malloc(AUDIO_BUFFER_SIZE * sizeof(int16_t));
-        if (audioBuffers[i] == NULL) {
-            Serial.printf("Failed to allocate memory for audio buffer %d\n", i);
+        audioBuffers[i] = (int16_t*)malloc(BUFFER_SIZE_SAMPLES * sizeof(int16_t));
+        if (!audioBuffers[i]) {
+            Serial.printf("Failed to allocate buffer %d\n", i);
             return;
         }
     }
-    
-    // Create semaphore for buffer synchronization
+
+    // Create semaphore
     bufferSemaphore = xSemaphoreCreateBinary();
-    if (bufferSemaphore == NULL) {
-        Serial.println("Failed to create buffer semaphore");
+    if (!bufferSemaphore) {
+        Serial.println("Failed to create semaphore");
         return;
     }
-    
-    Serial.println("Double audio buffers allocated successfully");
 
-    // Setup web server routes
+    // Initialize UDP for audio broadcasting
+    udpAudio.begin(UDP_AUDIO_PORT);
+    Serial.printf("UDP audio broadcasting on port %d\n", UDP_AUDIO_PORT);
+
+    // Setup HTTP server routes
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
         request->send(LittleFS, "/index.html", "text/html");
     });
 
-    // Serve any other files from LittleFS
+    // Configuration endpoint
+    server.on("/api/config", HTTP_GET, [](AsyncWebServerRequest *request){
+        String response = "{";
+        response += "\"sampleRate\":" + String(SAMPLE_RATE);
+        response += ",\"frameSize\":" + String(OPUS_FRAME_SIZE);
+        response += ",\"udpAudioPort\":" + String(UDP_AUDIO_PORT);
+        response += ",\"udpStatsPort\":" + String(UDP_STATS_PORT);
+        response += ",\"buffers\":" + String(NUM_BUFFERS);
+        response += ",\"audioInterval\":" + String(AUDIO_SEND_INTERVAL);
+        response += ",\"statsInterval\":" + String(STATS_SEND_INTERVAL);
+        response += ",\"magic\":\"0x" + String(AUDIO_MAGIC, HEX) + "\"";
+        response += "}";
+        request->send(200, "application/json", response);
+    });
+
+    // Serve static files
     server.serveStatic("/", LittleFS, "/");
 
-    // Setup WebSocket
-    ws.onEvent(onWsEvent);
-    server.addHandler(&ws);
+    // Setup WebSockets
+    wsStats.onEvent(onWsStatsEvent);
+    wsAudio.onEvent(onWsAudioEvent);
+    server.addHandler(&wsStats);
+    server.addHandler(&wsAudio);
     
     server.begin();
+    Serial.println("HTTP Server and WebSockets started");
+    Serial.println("Statistics WebSocket: /stats");
+    Serial.println("Audio WebSocket: /audio (browser fallback)");
 
-    // Create audio capture task (higher priority)
-    xTaskCreate(
-        audioTask,       // Task function
-        "AudioCapture",  // Task name
-        TASK_STACK_SIZE, // Stack size
-        NULL,           // Task parameters
-        2,              // Higher priority for audio capture
-        NULL            // Task handle
-    );
+    // Initialize statistics
+    sessionStartTime = millis();
+    lastStatsUpdate = sessionStartTime;
+    lastAudioSend = sessionStartTime;
+    memset(&stats, 0, sizeof(stats));
+
+    // Create tasks
+    xTaskCreate(audioTask, "AudioCapture", TASK_STACK_SIZE, NULL, 3, NULL);
+    xTaskCreate(transmitTask, "AudioTransmit", TASK_STACK_SIZE, NULL, 2, NULL);
+    xTaskCreate(statsTask, "StatsTransmit", TASK_STACK_SIZE, NULL, 1, NULL);
     
-    // Create main processing task
-    xTaskCreate(
-        mainLoopTask,    // Task function
-        "MainLoop",      // Task name
-        TASK_STACK_SIZE, // Stack size
-        NULL,           // Task parameters
-        1,              // Lower priority for processing
-        NULL            // Task handle
-    );
+    Serial.println("All tasks started!");
+    Serial.printf("Audio: UDP broadcast on port %d + WebSocket /audio\n", UDP_AUDIO_PORT);
+    Serial.printf("Stats: WebSocket /stats every %dms\n", STATS_SEND_INTERVAL);
 }
 
-void mainLoopTask(void *parameter) {
-    TickType_t lastWebSocketTime = 0;
-    size_t totalBytesProcessed = 0;
-    
-    while(1) {
-        // Wait for a buffer to be ready
-        if (xSemaphoreTake(bufferSemaphore, pdMS_TO_TICKS(100)) == pdTRUE) {
-            TickType_t currentTime = xTaskGetTickCount();
-            
-            // Find and process ready buffer
-            for (int i = 0; i < NUM_BUFFERS; i++) {
-                if (bufferReady[i]) {
-                    bufferReady[i] = false;
-                    
-                    // Send data if we have connected clients and enough time has passed
-                    if (ws.count() > 0 && (currentTime - lastWebSocketTime) >= pdMS_TO_TICKS(WEBSOCKET_INTERVAL)) {
-                        size_t dataSize = AUDIO_BUFFER_SIZE * sizeof(int16_t);
-                        
-                        // Check if WebSocket can accept more data (simple backpressure)
-                        bool canSend = true;
-                        if (ws.count() > 0) {
-                            // Simple check: if we have clients, limit sending frequency
-                            static uint32_t skipCounter = 0;
-                            skipCounter++;
-                            if (skipCounter % 2 == 0) {  // Send every other buffer to reduce load
-                                canSend = true;
-                            } else {
-                                canSend = false;
-                            }
-                        }
-                        
-                        if (canSend) {
-                            ws.binaryAll((uint8_t*)audioBuffers[i], dataSize);
-                            lastWebSocketTime = currentTime;
-                            totalBytesProcessed += dataSize;
-                            
-                            // Print debug info occasionally
-                            if (totalBytesProcessed % (SAMPLE_RATE * 2) == 0) {  // Every second
-                                Serial.printf("Audio streaming: %u bytes/sec, %d clients, latency: ~%dms\n", 
-                                             totalBytesProcessed, ws.count(), (AUDIO_BUFFER_SIZE * 1000) / SAMPLE_RATE);
-                                totalBytesProcessed = 0;
-                            }
-                        } else {
-                            // Skip this buffer to prevent queue overflow
-                            Serial.println("Skipping audio packet - WebSocket queue full");
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-        
-        // WebSocket cleanup
-        ws.cleanupClients();
-    }
-}
-
-// Empty loop() since we're using a separate task
 void loop() {
-
+    // Cleanup WebSocket connections
+    wsStats.cleanupClients();
+    wsAudio.cleanupClients();
+    vTaskDelay(pdMS_TO_TICKS(1000));
 }
